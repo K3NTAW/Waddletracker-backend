@@ -12,7 +12,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
 
   res.json({
     message: 'WaddleTracker API',
-    version: '1.0.0',
+    version: '2.0.0',
     endpoints: {
       auth: {
         discord: '/api/auth/discord',
@@ -40,6 +40,33 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
       streaks: {
         get: '/api/streak/:userId',
       },
+      discord: {
+        checkin_embed: '/api/discord/checkin-embed',
+        profile_embed: '/api/discord/profile-embed',
+        cheer_embed: '/api/discord/cheer-embed',
+        webhook: '/api/discord/webhook',
+      },
+      leaderboard: {
+        streaks: '/api/leaderboard/streaks',
+        checkins: '/api/leaderboard/checkins',
+      },
+      gallery: {
+        user_photos: '/api/gallery/:userId',
+      },
+      notifications: {
+        user_notifications: '/api/notifications/:userId',
+      },
+      analytics: {
+        user_analytics: '/api/analytics/:userId',
+      },
+    },
+    features: {
+      discord_bot_integration: true,
+      photo_gallery: true,
+      notifications_system: true,
+      leaderboards: true,
+      analytics: true,
+      webhook_support: true,
     },
     documentation: 'https://github.com/your-username/waddle-tracker-backend',
   });
