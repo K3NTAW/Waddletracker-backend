@@ -939,7 +939,7 @@ async function handleNotificationsList(req: VercelRequest, res: VercelResponse) 
       }
 
       // Build filters
-      let whereClause: any = { to_user_id: userId };
+      let whereClause: any = { user_id: userId };
       
       if (type !== 'all') {
         whereClause.type = type;
@@ -996,7 +996,7 @@ async function handleNotificationsList(req: VercelRequest, res: VercelResponse) 
       await prisma.notification.updateMany({
         where: {
           id: { in: notification_ids },
-          to_user_id: userId,
+          user_id: userId,
         },
         data: { read_at: new Date() },
       });
@@ -1006,7 +1006,7 @@ async function handleNotificationsList(req: VercelRequest, res: VercelResponse) 
       // PUT method - mark all notifications as read
       const updatedCount = await prisma.notification.updateMany({
         where: {
-          to_user_id: userId,
+          user_id: userId,
           read_at: null,
         },
         data: { read_at: new Date() },
