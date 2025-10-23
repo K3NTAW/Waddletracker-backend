@@ -1,0 +1,83 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String    @id @default(cuid())
+  discord_id     String    @unique
+  username       String
+  avatar_url     String?
+  bio            String?
+  joined_at      DateTime  @default(now())
+  streak_count   Int       @default(0)
+  longest_streak Int       @default(0)
+  total_checkins Int       @default(0)
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  // Relations
+  checkins       CheckIn[]
+  schedules      Schedule[]
+  cheers_sent    Cheer[]    @relation("CheerSender")
+  cheers_received Cheer[]   @relation("CheerReceiver")
+
+  @@map("users")
+}
+
+model CheckIn {
+  id                String    @id @default(cuid())
+  user_id           String
+  date              DateTime
+  status            CheckInStatus
+  photo_url         String?
+  discord_message_id String?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime  @updatedAt
+
+  // Relations
+  user              User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, date], name: "user_id_date")
+  @@map("checkins")
+}
+
+model Schedule {
+  id           String   @id @default(cuid())
+  user_id      String
+  days_of_week String[]
+  time         String?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  // Relations
+  user         User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@map("schedules")
+}
+
+model Cheer {
+  id           String   @id @default(cuid())
+  from_user_id String
+  to_user_id   String
+  message      String?
+  created_at   DateTime @default(now())
+
+  // Relations
+  from_user    User     @relation("CheerSender", fields: [from_user_id], references: [id], onDelete: Cascade)
+  to_user      User     @relation("CheerReceiver", fields: [to_user_id], references: [id], onDelete: Cascade)
+
+  @@map("cheers")
+}
+
+enum CheckInStatus {
+  went
+  missed
+}
