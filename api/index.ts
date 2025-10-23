@@ -2,6 +2,76 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { prisma } from '../src/lib/prisma';
 import { createErrorResponse, createSuccessResponse } from '../src/lib/validation';
 
+// Helper function to calculate streak
+async function calculateStreak(userId: string) {
+  const checkins = await prisma.checkIn.findMany({
+    where: { user_id: userId },
+    orderBy: { date: 'desc' },
+  });
+
+  if (checkins.length === 0) {
+    return { current_streak: 0, longest_streak: 0, total_checkins: 0 };
+  }
+
+  let currentStreak = 0;
+  let longestStreak = 0;
+  let tempStreak = 0;
+  
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  // Check if user checked in today
+  const todayCheckin = checkins.find(checkin => {
+    const checkinDate = new Date(checkin.date);
+    checkinDate.setHours(0, 0, 0, 0);
+    return checkinDate.getTime() === today.getTime();
+  });
+
+  if (todayCheckin) {
+    currentStreak = 1;
+    tempStreak = 1;
+    
+    // Count consecutive days backwards
+    for (let i = 1; i < checkins.length; i++) {
+      const currentDate = new Date(checkins[i].date);
+      const previousDate = new Date(checkins[i - 1].date);
+      
+      const dayDiff = Math.floor((previousDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24));
+      
+      if (dayDiff === 1) {
+        tempStreak++;
+        currentStreak = tempStreak;
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Calculate longest streak
+  tempStreak = 1;
+  longestStreak = 1;
+  
+  for (let i = 1; i < checkins.length; i++) {
+    const currentDate = new Date(checkins[i].date);
+    const previousDate = new Date(checkins[i - 1].date);
+    
+    const dayDiff = Math.floor((previousDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (dayDiff === 1) {
+      tempStreak++;
+      longestStreak = Math.max(longestStreak, tempStreak);
+    } else {
+      tempStreak = 1;
+    }
+  }
+
+  return {
+    current_streak: currentStreak,
+    longest_streak: longestStreak,
+    total_checkins: checkins.length,
+  };
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -160,8 +230,93 @@ async function handleAuthCallback(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json(createErrorResponse('Authorization code required'));
   }
 
-  // TODO: Implement Discord OAuth callback logic
-  return res.json(createSuccessResponse({ message: 'Auth callback - TODO: Implement OAuth logic' }));
+  try {
+    // Exchange code for access token
+    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: process.env.DISCORD_CLIENT_ID!,
+        client_secret: process.env.DISCORD_CLIENT_SECRET!,
+        grant_type: 'authorization_code',
+        code: code as string,
+        redirect_uri: process.env.DISCORD_REDIRECT_URI!,
+      }),
+    });
+
+    if (!tokenResponse.ok) {
+      return res.status(400).json(createErrorResponse('Failed to exchange code for token'));
+    }
+
+    const tokenData = await tokenResponse.json() as any;
+    const { access_token } = tokenData;
+
+    // Get user info from Discord
+    const userResponse = await fetch('https://discord.com/api/users/@me', {
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+      },
+    });
+
+    if (!userResponse.ok) {
+      return res.status(400).json(createErrorResponse('Failed to fetch user info from Discord'));
+    }
+
+    const discordUser = await userResponse.json() as any;
+
+    // Find or create user in database
+    let user = await prisma.user.findUnique({
+      where: { discord_id: discordUser.id },
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          discord_id: discordUser.id,
+          username: discordUser.username,
+          avatar_url: discordUser.avatar ? 
+            `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png` : 
+            null,
+          bio: null,
+          timezone: 'UTC',
+          is_active: true,
+        },
+      });
+    } else {
+      // Update user info
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          username: discordUser.username,
+          avatar_url: discordUser.avatar ? 
+            `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png` : 
+            null,
+        },
+      });
+    }
+
+    // Generate JWT token
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      { 
+        id: user.id, 
+        discord_id: user.discord_id, 
+        username: user.username 
+      },
+      process.env.JWT_SECRET!,
+      { expiresIn: '7d' }
+    );
+
+    // Redirect to frontend with token
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    return res.redirect(`${frontendUrl}/auth/callback?token=${token}`);
+
+  } catch (error) {
+    console.error('Auth callback error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleAuthMe(req: VercelRequest, res: VercelResponse) {
@@ -169,8 +324,60 @@ async function handleAuthMe(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement JWT verification and user data retrieval
-  return res.json(createSuccessResponse({ message: 'Auth me - TODO: Implement JWT verification' }));
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json(createErrorResponse('Authorization header required'));
+    }
+
+    const token = authHeader.split(' ')[1];
+    const jwt = require('jsonwebtoken');
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!);
+    } catch (error) {
+      return res.status(401).json(createErrorResponse('Invalid or expired token'));
+    }
+
+    // Get user from database
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: {
+        id: true,
+        discord_id: true,
+        username: true,
+        avatar_url: true,
+        bio: true,
+        timezone: true,
+        is_active: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found'));
+    }
+
+    return res.json(createSuccessResponse({
+      user: {
+        id: user.id,
+        discord_id: user.discord_id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+        bio: user.bio,
+        timezone: user.timezone,
+        is_active: user.is_active,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
+      },
+    }));
+
+  } catch (error) {
+    console.error('Auth me error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 // User handlers
@@ -273,8 +480,94 @@ async function handleCheckinCreate(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement check-in creation logic
-  return res.json(createSuccessResponse({ message: 'Check-in create - TODO: Implement check-in logic' }));
+  try {
+    // Verify authentication
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json(createErrorResponse('Authorization header required'));
+    }
+
+    const token = authHeader.split(' ')[1];
+    const jwt = require('jsonwebtoken');
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!);
+    } catch (error) {
+      return res.status(401).json(createErrorResponse('Invalid or expired token'));
+    }
+
+    const { workout_type, notes, photo_url, duration_minutes, calories_burned } = req.body;
+
+    // Validate required fields
+    if (!workout_type) {
+      return res.status(400).json(createErrorResponse('Workout type is required'));
+    }
+
+    // Check if user already checked in today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const existingCheckin = await prisma.checkIn.findFirst({
+      where: {
+        user_id: decoded.id,
+        date: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+
+    if (existingCheckin) {
+      return res.status(400).json(createErrorResponse('User has already checked in today'));
+    }
+
+    // Create check-in
+    const checkin = await prisma.checkIn.create({
+      data: {
+        user_id: decoded.id,
+        status: 'went',
+        workout_type,
+        notes: notes || null,
+        photo_url: photo_url || null,
+        duration_minutes: duration_minutes || null,
+        calories_burned: calories_burned || null,
+        date: new Date(),
+      },
+    });
+
+    // Calculate and update streak
+    const streak = await calculateStreak(decoded.id);
+    await prisma.user.update({
+      where: { id: decoded.id },
+      data: { 
+        current_streak: streak.current_streak,
+        longest_streak: streak.longest_streak,
+        total_checkins: streak.total_checkins,
+      },
+    });
+
+    return res.status(201).json(createSuccessResponse({
+      checkin: {
+        id: checkin.id,
+        user_id: checkin.user_id,
+        workout_type: checkin.workout_type,
+        notes: checkin.notes,
+        photo_url: checkin.photo_url,
+        duration_minutes: checkin.duration_minutes,
+        calories_burned: checkin.calories_burned,
+        date: checkin.date,
+        created_at: checkin.created_at,
+      },
+      streak: streak,
+    }));
+
+  } catch (error) {
+    console.error('Check-in create error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleCheckinList(req: VercelRequest, res: VercelResponse) {
@@ -389,8 +682,98 @@ async function handleScheduleCreate(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement schedule creation logic
-  return res.json(createSuccessResponse({ message: 'Schedule create - TODO: Implement schedule logic' }));
+  try {
+    // Verify authentication
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json(createErrorResponse('Authorization header required'));
+    }
+
+    const token = authHeader.split(' ')[1];
+    const jwt = require('jsonwebtoken');
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!);
+    } catch (error) {
+      return res.status(401).json(createErrorResponse('Invalid or expired token'));
+    }
+
+    const { 
+      monday, tuesday, wednesday, thursday, friday, saturday, sunday,
+      timezone, reminder_time, is_active 
+    } = req.body;
+
+    // Validate required fields
+    if (!monday && !tuesday && !wednesday && !thursday && !friday && !saturday && !sunday) {
+      return res.status(400).json(createErrorResponse('At least one day must be selected'));
+    }
+
+    // Check if user already has a schedule
+    const existingSchedule = await prisma.schedule.findFirst({
+      where: { user_id: decoded.id },
+    });
+
+    let schedule;
+    if (existingSchedule) {
+      // Update existing schedule
+      schedule = await prisma.schedule.update({
+        where: { id: existingSchedule.id },
+        data: {
+          monday: monday || false,
+          tuesday: tuesday || false,
+          wednesday: wednesday || false,
+          thursday: thursday || false,
+          friday: friday || false,
+          saturday: saturday || false,
+          sunday: sunday || false,
+          timezone: timezone || 'UTC',
+          reminder_time: reminder_time || '09:00',
+          is_active: is_active !== undefined ? is_active : true,
+        },
+      });
+    } else {
+      // Create new schedule
+      schedule = await prisma.schedule.create({
+        data: {
+          user_id: decoded.id,
+          monday: monday || false,
+          tuesday: tuesday || false,
+          wednesday: wednesday || false,
+          thursday: thursday || false,
+          friday: friday || false,
+          saturday: saturday || false,
+          sunday: sunday || false,
+          timezone: timezone || 'UTC',
+          reminder_time: reminder_time || '09:00',
+          is_active: is_active !== undefined ? is_active : true,
+        },
+      });
+    }
+
+    return res.status(201).json(createSuccessResponse({
+      schedule: {
+        id: schedule.id,
+        user_id: schedule.user_id,
+        monday: schedule.monday,
+        tuesday: schedule.tuesday,
+        wednesday: schedule.wednesday,
+        thursday: schedule.thursday,
+        friday: schedule.friday,
+        saturday: schedule.saturday,
+        sunday: schedule.sunday,
+        timezone: schedule.timezone,
+        reminder_time: schedule.reminder_time,
+        is_active: schedule.is_active,
+        created_at: schedule.created_at,
+        updated_at: schedule.updated_at,
+      },
+    }));
+
+  } catch (error) {
+    console.error('Schedule create error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleScheduleGet(req: VercelRequest, res: VercelResponse) {
@@ -411,8 +794,16 @@ async function handleScheduleGet(req: VercelRequest, res: VercelResponse) {
       where: { user_id: userId },
       select: {
         id: true,
-        days_of_week: true,
-        time: true,
+        monday: true,
+        tuesday: true,
+        wednesday: true,
+        thursday: true,
+        friday: true,
+        saturday: true,
+        sunday: true,
+        timezone: true,
+        reminder_time: true,
+        is_active: true,
         created_at: true,
         updated_at: true,
       },
@@ -435,8 +826,99 @@ async function handleCheerSend(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement cheer sending logic
-  return res.json(createSuccessResponse({ message: 'Cheer send - TODO: Implement cheer logic' }));
+  try {
+    // Verify authentication
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json(createErrorResponse('Authorization header required'));
+    }
+
+    const token = authHeader.split(' ')[1];
+    const jwt = require('jsonwebtoken');
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!);
+    } catch (error) {
+      return res.status(401).json(createErrorResponse('Invalid or expired token'));
+    }
+
+    const { to_user_id, message, type } = req.body;
+
+    // Validate required fields
+    if (!to_user_id) {
+      return res.status(400).json(createErrorResponse('Recipient user ID is required'));
+    }
+
+    if (!message || message.trim().length === 0) {
+      return res.status(400).json(createErrorResponse('Cheer message is required'));
+    }
+
+    // Check if recipient exists
+    const recipient = await prisma.user.findUnique({
+      where: { id: to_user_id },
+    });
+
+    if (!recipient) {
+      return res.status(404).json(createErrorResponse('Recipient user not found'));
+    }
+
+    // Prevent self-cheering
+    if (decoded.id === to_user_id) {
+      return res.status(400).json(createErrorResponse('Cannot send cheer to yourself'));
+    }
+
+    // Create cheer
+    const cheer = await prisma.cheer.create({
+      data: {
+        from_user_id: decoded.id,
+        to_user_id: to_user_id,
+        message: message.trim(),
+        type: type || 'general',
+      },
+    });
+
+    // Create notification for recipient
+    await prisma.notification.create({
+      data: {
+        user_id: to_user_id,
+        from_user_id: decoded.id,
+        type: 'cheer',
+        title: 'New Cheer! 🎉',
+        message: `You received a cheer: "${message.trim()}"`,
+        data: {
+          cheer_id: cheer.id,
+          from_username: decoded.username,
+        },
+      },
+    });
+
+    // Get sender info for response
+    const sender = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: {
+        id: true,
+        username: true,
+        avatar_url: true,
+      },
+    });
+
+    return res.status(201).json(createSuccessResponse({
+      cheer: {
+        id: cheer.id,
+        from_user_id: cheer.from_user_id,
+        to_user_id: cheer.to_user_id,
+        message: cheer.message,
+        type: cheer.type,
+        created_at: cheer.created_at,
+        sender: sender,
+      },
+    }));
+
+  } catch (error) {
+    console.error('Cheer send error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleCheerList(req: VercelRequest, res: VercelResponse) {
@@ -489,14 +971,42 @@ async function handleStreakGet(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    // TODO: Implement streak calculation logic
-    const streakData = {
-      current_streak: 0,
-      longest_streak: 0,
-      total_checkins: 0,
-    };
+    // Check if user exists
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true },
+    });
 
-    return res.json(createSuccessResponse(streakData));
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found'));
+    }
+
+    // Calculate streak using our helper function
+    const streakData = await calculateStreak(userId);
+
+    // Get additional streak information
+    const checkins = await prisma.checkIn.findMany({
+      where: { user_id: userId },
+      orderBy: { date: 'desc' },
+      take: 10,
+    });
+
+    const recentCheckins = checkins.map(checkin => ({
+      id: checkin.id,
+      date: checkin.date,
+      workout_type: checkin.workout_type,
+      notes: checkin.notes,
+    }));
+
+    return res.json(createSuccessResponse({
+      ...streakData,
+      recent_checkins: recentCheckins,
+      last_checkin: checkins[0] ? {
+        id: checkins[0].id,
+        date: checkins[0].date,
+        workout_type: checkins[0].workout_type,
+      } : null,
+    }));
   } catch (error) {
     console.error('Streak get error:', error);
     return res.status(500).json(createErrorResponse('Failed to fetch streak data', 500));
@@ -509,8 +1019,116 @@ async function handleDiscordCheckinEmbed(req: VercelRequest, res: VercelResponse
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement Discord check-in embed logic
-  return res.json(createSuccessResponse({ message: 'Discord check-in embed - TODO: Implement embed logic' }));
+  try {
+    const { user_id, checkin_id } = req.body;
+
+    if (!user_id) {
+      return res.status(400).json(createErrorResponse('User ID is required'));
+    }
+
+    // Get user info
+    const user = await prisma.user.findUnique({
+      where: { id: user_id },
+      select: {
+        id: true,
+        username: true,
+        avatar_url: true,
+        current_streak: true,
+        total_checkins: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found'));
+    }
+
+    let checkin = null;
+    if (checkin_id) {
+      checkin = await prisma.checkIn.findUnique({
+        where: { id: checkin_id },
+        select: {
+          id: true,
+          workout_type: true,
+          notes: true,
+          photo_url: true,
+          duration_minutes: true,
+          calories_burned: true,
+          date: true,
+        },
+      });
+    } else {
+      // Get latest check-in
+      checkin = await prisma.checkIn.findFirst({
+        where: { user_id: user_id },
+        orderBy: { date: 'desc' },
+        select: {
+          id: true,
+          workout_type: true,
+          notes: true,
+          photo_url: true,
+          duration_minutes: true,
+          calories_burned: true,
+          date: true,
+        },
+      });
+    }
+
+    if (!checkin) {
+      return res.status(404).json(createErrorResponse('No check-in found'));
+    }
+
+    // Create Discord embed
+    const embed: any = {
+      title: `🏋️ ${user.username} just checked in!`,
+      description: `**Workout:** ${checkin.workout_type}\n${checkin.notes ? `**Notes:** ${checkin.notes}\n` : ''}${checkin.duration_minutes ? `**Duration:** ${checkin.duration_minutes} minutes\n` : ''}${checkin.calories_burned ? `**Calories:** ${checkin.calories_burned}\n` : ''}`,
+      color: 0x00ff00, // Green color
+      thumbnail: {
+        url: user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '🔥 Current Streak',
+          value: `${user.current_streak} days`,
+          inline: true,
+        },
+        {
+          name: '📊 Total Check-ins',
+          value: `${user.total_checkins}`,
+          inline: true,
+        },
+        {
+          name: '📅 Date',
+          value: new Date(checkin.date).toLocaleDateString(),
+          inline: true,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Keep up the great work!',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Add image if available
+    if (checkin.photo_url) {
+      embed.image = {
+        url: checkin.photo_url,
+      };
+    }
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      user: {
+        id: user.id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+      },
+      checkin: checkin,
+    }));
+
+  } catch (error) {
+    console.error('Discord check-in embed error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleDiscordProfileEmbed(req: VercelRequest, res: VercelResponse) {
@@ -518,8 +1136,140 @@ async function handleDiscordProfileEmbed(req: VercelRequest, res: VercelResponse
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement Discord profile embed logic
-  return res.json(createSuccessResponse({ message: 'Discord profile embed - TODO: Implement embed logic' }));
+  try {
+    const url = new URL(req.url || '', 'http://localhost');
+    const userId = url.searchParams.get('user_id');
+
+    if (!userId) {
+      return res.status(400).json(createErrorResponse('User ID is required'));
+    }
+
+    // Get user info with stats
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        username: true,
+        avatar_url: true,
+        bio: true,
+        current_streak: true,
+        longest_streak: true,
+        total_checkins: true,
+        created_at: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found'));
+    }
+
+    // Get recent check-ins
+    const recentCheckins = await prisma.checkIn.findMany({
+      where: { user_id: userId },
+      orderBy: { date: 'desc' },
+      take: 5,
+      select: {
+        id: true,
+        workout_type: true,
+        date: true,
+        notes: true,
+      },
+    });
+
+    // Get cheers received
+    const cheersReceived = await prisma.cheer.count({
+      where: { to_user_id: userId },
+    });
+
+    // Get cheers sent
+    const cheersSent = await prisma.cheer.count({
+      where: { from_user_id: userId },
+    });
+
+    // Calculate days since joining
+    const daysSinceJoining = Math.floor((Date.now() - new Date(user.created_at).getTime()) / (1000 * 60 * 60 * 24));
+
+    // Create Discord embed
+    const embed = {
+      title: `👤 ${user.username}'s Profile`,
+      description: user.bio || 'No bio available',
+      color: 0x0099ff, // Blue color
+      thumbnail: {
+        url: user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '🔥 Current Streak',
+          value: `${user.current_streak} days`,
+          inline: true,
+        },
+        {
+          name: '🏆 Longest Streak',
+          value: `${user.longest_streak} days`,
+          inline: true,
+        },
+        {
+          name: '📊 Total Check-ins',
+          value: `${user.total_checkins}`,
+          inline: true,
+        },
+        {
+          name: '🎉 Cheers Received',
+          value: `${cheersReceived}`,
+          inline: true,
+        },
+        {
+          name: '💝 Cheers Sent',
+          value: `${cheersSent}`,
+          inline: true,
+        },
+        {
+          name: '📅 Member Since',
+          value: `${daysSinceJoining} days ago`,
+          inline: true,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Fitness Community',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Add recent check-ins if available
+    if (recentCheckins.length > 0) {
+      const recentWorkouts = recentCheckins.map(checkin => 
+        `• ${checkin.workout_type} (${new Date(checkin.date).toLocaleDateString()})`
+      ).join('\n');
+      
+      embed.fields.push({
+        name: '📝 Recent Workouts',
+        value: recentWorkouts,
+        inline: false,
+      });
+    }
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      user: {
+        id: user.id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+        bio: user.bio,
+      },
+      stats: {
+        current_streak: user.current_streak,
+        longest_streak: user.longest_streak,
+        total_checkins: user.total_checkins,
+        cheers_received: cheersReceived,
+        cheers_sent: cheersSent,
+        days_since_joining: daysSinceJoining,
+      },
+    }));
+
+  } catch (error) {
+    console.error('Discord profile embed error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleDiscordCheerEmbed(req: VercelRequest, res: VercelResponse) {
@@ -527,8 +1277,85 @@ async function handleDiscordCheerEmbed(req: VercelRequest, res: VercelResponse) 
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement Discord cheer embed logic
-  return res.json(createSuccessResponse({ message: 'Discord cheer embed - TODO: Implement embed logic' }));
+  try {
+    const { cheer_id } = req.body;
+
+    if (!cheer_id) {
+      return res.status(400).json(createErrorResponse('Cheer ID is required'));
+    }
+
+    // Get cheer with user info
+    const cheer = await prisma.cheer.findUnique({
+      where: { id: cheer_id },
+      include: {
+        from_user: {
+          select: {
+            id: true,
+            username: true,
+            avatar_url: true,
+          },
+        },
+        to_user: {
+          select: {
+            id: true,
+            username: true,
+            avatar_url: true,
+          },
+        },
+      },
+    });
+
+    if (!cheer) {
+      return res.status(404).json(createErrorResponse('Cheer not found'));
+    }
+
+    // Create Discord embed
+    const embed = {
+      title: '🎉 Someone sent a cheer!',
+      description: `**${cheer.from_user.username}** cheered **${cheer.to_user.username}**:\n\n"${cheer.message}"`,
+      color: 0xffd700, // Gold color
+      thumbnail: {
+        url: cheer.from_user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '👤 From',
+          value: cheer.from_user.username,
+          inline: true,
+        },
+        {
+          name: '👤 To',
+          value: cheer.to_user.username,
+          inline: true,
+        },
+        {
+          name: '💬 Type',
+          value: cheer.type || 'general',
+          inline: true,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Spread the positivity!',
+      },
+      timestamp: new Date(cheer.created_at).toISOString(),
+    };
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      cheer: {
+        id: cheer.id,
+        message: cheer.message,
+        type: cheer.type,
+        created_at: cheer.created_at,
+      },
+      from_user: cheer.from_user,
+      to_user: cheer.to_user,
+    }));
+
+  } catch (error) {
+    console.error('Discord cheer embed error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 async function handleDiscordWebhook(req: VercelRequest, res: VercelResponse) {
@@ -536,8 +1363,94 @@ async function handleDiscordWebhook(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
-  // TODO: Implement Discord webhook logic
-  return res.json(createSuccessResponse({ message: 'Discord webhook - TODO: Implement webhook logic' }));
+  try {
+    const { webhook_url, event_type, data } = req.body;
+
+    if (!webhook_url) {
+      return res.status(400).json(createErrorResponse('Webhook URL is required'));
+    }
+
+    if (!event_type) {
+      return res.status(400).json(createErrorResponse('Event type is required'));
+    }
+
+    if (!data) {
+      return res.status(400).json(createErrorResponse('Data is required'));
+    }
+
+    // Validate webhook URL format
+    try {
+      new URL(webhook_url);
+    } catch (error) {
+      return res.status(400).json(createErrorResponse('Invalid webhook URL format'));
+    }
+
+    let payload;
+    
+    switch (event_type) {
+      case 'checkin':
+        payload = {
+          content: `🏋️ **${data.username}** just checked in!`,
+          embeds: [data.embed],
+        };
+        break;
+        
+      case 'cheer':
+        payload = {
+          content: `🎉 **${data.from_username}** cheered **${data.to_username}**!`,
+          embeds: [data.embed],
+        };
+        break;
+        
+      case 'streak_milestone':
+        payload = {
+          content: `🔥 **${data.username}** reached a ${data.streak_count} day streak! Amazing work!`,
+          embeds: [data.embed],
+        };
+        break;
+        
+      case 'profile':
+        payload = {
+          content: `👤 **${data.username}'s** profile`,
+          embeds: [data.embed],
+        };
+        break;
+        
+      default:
+        payload = {
+          content: data.message || 'WaddleFit notification',
+          embeds: data.embed ? [data.embed] : undefined,
+        };
+    }
+
+    // Send webhook to Discord
+    const webhookResponse = await fetch(webhook_url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!webhookResponse.ok) {
+      const errorText = await webhookResponse.text();
+      console.error('Discord webhook error:', errorText);
+      return res.status(400).json(createErrorResponse('Failed to send webhook to Discord'));
+    }
+
+    const webhookResult = await webhookResponse.json() as any;
+
+    return res.json(createSuccessResponse({
+      success: true,
+      webhook_id: webhookResult.id,
+      event_type: event_type,
+      sent_at: new Date().toISOString(),
+    }));
+
+  } catch (error) {
+    console.error('Discord webhook error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
 }
 
 // Leaderboard handlers

@@ -16,10 +16,13 @@ model User {
   username       String
   avatar_url     String?
   bio            String?
+  timezone       String    @default("UTC")
+  is_active      Boolean   @default(true)
   joined_at      DateTime  @default(now())
   streak_count   Int       @default(0)
   longest_streak Int       @default(0)
   total_checkins Int       @default(0)
+  current_streak Int       @default(0)
   created_at     DateTime  @default(now())
   updated_at     DateTime  @updatedAt
 
@@ -39,7 +42,11 @@ model CheckIn {
   user_id           String
   date              DateTime
   status            CheckInStatus
+  workout_type      String?
+  notes             String?
   photo_url         String?
+  duration_minutes  Int?
+  calories_burned   Int?
   discord_message_id String?
   created_at        DateTime  @default(now())
   updated_at        DateTime  @updatedAt
@@ -52,15 +59,23 @@ model CheckIn {
 }
 
 model Schedule {
-  id           String   @id @default(cuid())
-  user_id      String
-  days_of_week String[]
-  time         String?
-  created_at   DateTime @default(now())
-  updated_at   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  user_id       String   @unique
+  monday        Boolean  @default(false)
+  tuesday       Boolean  @default(false)
+  wednesday     Boolean  @default(false)
+  thursday      Boolean  @default(false)
+  friday        Boolean  @default(false)
+  saturday      Boolean  @default(false)
+  sunday        Boolean  @default(false)
+  timezone      String   @default("UTC")
+  reminder_time String   @default("09:00")
+  is_active     Boolean  @default(true)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
 
   // Relations
-  user         User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@map("schedules")
 }
@@ -70,6 +85,7 @@ model Cheer {
   from_user_id String
   to_user_id   String
   message      String?
+  type         String   @default("general")
   created_at   DateTime @default(now())
 
   // Relations
