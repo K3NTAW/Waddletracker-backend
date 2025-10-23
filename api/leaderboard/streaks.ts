@@ -3,10 +3,6 @@ import { prisma } from '../../src/lib/prisma';
 import { createErrorResponse, createSuccessResponse } from '../../src/lib/validation';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'GET') {
-    return res.status(405).json(createErrorResponse('Method not allowed', 405));
-  }
-
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -14,6 +10,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  if (req.method !== 'GET') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
   const { limit = '10', type = 'current' } = req.query;

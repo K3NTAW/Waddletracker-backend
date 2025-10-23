@@ -97,7 +97,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Add photo if available
     if (checkIn.photo_url) {
-      embedData.image = {
+      (embedData as any).image = {
         url: checkIn.photo_url,
       };
     }

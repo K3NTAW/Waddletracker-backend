@@ -3,10 +3,6 @@ import { prisma } from '../../src/lib/prisma';
 import { createErrorResponse, createSuccessResponse } from '../../src/lib/validation';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') {
-    return res.status(405).json(createErrorResponse('Method not allowed', 405));
-  }
-
   // Set CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -14,6 +10,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
   }
 
   try {
@@ -84,7 +84,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       throw new Error(`Discord webhook failed: ${webhookResponse.statusText}`);
     }
 
-    const webhookResult = await webhookResponse.json();
+    const webhookResult = await webhookResponse.json() as any;
 
     res.json(createSuccessResponse({
       webhook_sent: true,
