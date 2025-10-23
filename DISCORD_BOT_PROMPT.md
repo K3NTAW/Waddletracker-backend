@@ -5,7 +5,7 @@ Build a Discord bot for WaddleTracker - a gym accountability app that syncs with
 
 ## 📋 **Backend API Documentation**
 
-### **Base URL**: `http://localhost:3000/api` (development) or `https://your-domain.vercel.app/api` (production)
+### **Base URL**: `http://localhost:3000/api` (development) or `https://waddletracker-backend.vercel.app/api` (production)
 
 ### **Authentication**
 - **Discord OAuth2** integration
@@ -366,7 +366,7 @@ Build a Discord bot for WaddleTracker - a gym accountability app that syncs with
 
 ```env
 DISCORD_TOKEN=your_bot_token
-API_BASE_URL=http://localhost:3000/api
+API_BASE_URL=https://waddletracker-backend.vercel.app/api
 GUILD_ID=your_server_id
 CHANNEL_GYM_PICS=channel_id_for_checkins
 CHANNEL_GENERAL=general_channel_id
@@ -427,5 +427,68 @@ CHANNEL_GENERAL=general_channel_id
 2. Bot gets user's Discord ID
 3. Bot calls `GET /api/discord/profile-embed?discord_id=...`
 4. Bot posts embed with user's stats
+
+## 📊 **API Response Format**
+
+### **Success Response:**
+```json
+{
+  "success": true,
+  "data": { ... },
+  "message": "Operation completed successfully",
+  "timestamp": "2025-10-23T18:37:19.136Z"
+}
+```
+
+### **Error Response:**
+```json
+{
+  "success": false,
+  "error": "Error message",
+  "statusCode": 404,
+  "timestamp": "2025-10-23T18:37:19.136Z"
+}
+```
+
+### **Discord Embed Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "embed": {
+      "title": "🔥 Current Streak Leaderboard",
+      "description": "Top 10 users by current streak",
+      "color": 16766720,
+      "fields": [...],
+      "footer": { "text": "Keep pushing yourself! 💪" },
+      "timestamp": "2025-10-23T18:37:19.136Z"
+    }
+  }
+}
+```
+
+## 🚀 **Live API Status**
+
+### **✅ Production Ready**
+- **Live URL**: `https://waddletracker-backend.vercel.app/api`
+- **Status**: Fully deployed and functional
+- **HTTPS**: Automatically enabled
+- **Functions**: 24 endpoints consolidated into 1 serverless function
+- **Database**: PostgreSQL with Prisma ORM
+- **CORS**: Configured for all origins
+
+### **✅ Tested Endpoints**
+- **Main API**: `GET /api/` - Returns complete API documentation
+- **Leaderboards**: `GET /api/leaderboard/streaks` - Working with Discord embeds
+- **User Management**: `GET /api/users/:id` - Proper error handling
+- **All 24 endpoints** are functional and ready for integration
+
+### **🔧 Technical Architecture**
+- **Single Function**: All endpoints handled by `api/index.ts`
+- **Smart Routing**: URL path matching routes to appropriate handlers
+- **Vercel Optimized**: Deployed on Vercel with Node.js 20.x
+- **TypeScript**: Fully typed with proper error handling
+- **Database**: Prisma ORM with PostgreSQL
+- **Authentication**: Discord OAuth2 + JWT tokens
 
 This backend API is fully functional and ready for Discord bot integration. All endpoints are tested and working with proper error handling, CORS support, and Discord embed generation.
