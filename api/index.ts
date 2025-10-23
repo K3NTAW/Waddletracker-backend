@@ -118,6 +118,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleCheerList(req, res);
       case path.startsWith('streak/'):
         return handleStreakGet(req, res);
+      case path.startsWith('discord/register-embed'):
+        return handleDiscordRegisterEmbed(req, res);
+      case path.startsWith('discord/register'):
+        return handleDiscordRegister(req, res);
       case path.startsWith('discord/checkin-embed'):
         return handleDiscordCheckinEmbed(req, res);
       case path.startsWith('discord/profile-embed'):
@@ -178,6 +182,8 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         get: '/api/streak/:userId'
       },
       discord: {
+        register_embed: '/api/discord/register-embed',
+        register: '/api/discord/register',
         checkin_embed: '/api/discord/checkin-embed',
         profile_embed: '/api/discord/profile-embed',
         cheer_embed: '/api/discord/cheer-embed',
@@ -1014,6 +1020,176 @@ async function handleStreakGet(req: VercelRequest, res: VercelResponse) {
 }
 
 // Discord handlers
+async function handleDiscordRegisterEmbed(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    const { discord_id, username, avatar_url } = req.body;
+
+    if (!discord_id || !username) {
+      return res.status(400).json(createErrorResponse('Discord ID and username are required'));
+    }
+
+    // Create registration embed with button
+    const embed = {
+      title: '👤 User Not Found',
+      description: `**User:** @${username}\n\nThis user hasn't registered with WaddleTracker yet.\nThey need to register to start tracking their fitness journey!`,
+      color: 0xff6b6b, // Red color
+      thumbnail: {
+        url: avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '🔗 How to Register',
+          value: 'Click the button below to register instantly!',
+          inline: false,
+        },
+        {
+          name: '✨ What You Get',
+          value: '• Track your workouts\n• Build streaks\n• Get cheered on\n• Join the community!',
+          inline: false,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Your fitness journey starts here!',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Create components with registration button
+    const components = [
+      {
+        type: 1, // Action Row
+        components: [
+          {
+            type: 2, // Button
+            style: 1, // Primary (blue)
+            label: 'Register Now!',
+            custom_id: `register_${discord_id}`,
+            emoji: {
+              name: '🚀',
+            },
+          },
+          {
+            type: 2, // Button
+            style: 2, // Secondary (gray)
+            label: 'Learn More',
+            custom_id: `learn_more_${discord_id}`,
+            emoji: {
+              name: 'ℹ️',
+            },
+          },
+        ],
+      },
+    ];
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      components: components,
+      user: {
+        discord_id: discord_id,
+        username: username,
+        avatar_url: avatar_url,
+      },
+    }));
+
+  } catch (error) {
+    console.error('Discord register embed error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
+async function handleDiscordRegister(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    const { discord_id, username, avatar_url } = req.body;
+
+    if (!discord_id || !username) {
+      return res.status(400).json(createErrorResponse('Discord ID and username are required'));
+    }
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({
+      where: { discord_id: discord_id },
+    });
+
+    if (existingUser) {
+      return res.status(400).json(createErrorResponse('User already registered'));
+    }
+
+    // Create new user
+    const user = await prisma.user.create({
+      data: {
+        discord_id: discord_id,
+        username: username,
+        avatar_url: avatar_url || null,
+        bio: null,
+        timezone: 'UTC',
+        is_active: true,
+      },
+    });
+
+    // Generate JWT token for the new user
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      { 
+        id: user.id, 
+        discord_id: user.discord_id, 
+        username: user.username 
+      },
+      process.env.JWT_SECRET!,
+      { expiresIn: '7d' }
+    );
+
+    // Create success embed
+    const successEmbed = {
+      title: '🎉 Welcome to WaddleTracker!',
+      description: `**${username}** has successfully registered!\n\nYou can now start tracking your fitness journey!`,
+      color: 0x00ff00, // Green color
+      thumbnail: {
+        url: user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '🚀 Get Started',
+          value: 'Use `/checkin` to log your first workout!',
+          inline: false,
+        },
+        {
+          name: '📊 Your Stats',
+          value: '• Current Streak: 0 days\n• Total Check-ins: 0\n• Ready to start!',
+          inline: false,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Let\'s get fit together!',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    return res.status(201).json(createSuccessResponse({
+      user: {
+        id: user.id,
+        discord_id: user.discord_id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+      },
+      token: token,
+      message: 'User registered successfully!',
+      embed: successEmbed,
+    }));
+
+  } catch (error) {
+    console.error('Discord register error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
 async function handleDiscordCheckinEmbed(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
