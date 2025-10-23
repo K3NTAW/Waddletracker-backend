@@ -4,7 +4,7 @@
   "description": "Backend API for gym accountability app with Discord integration",
   "main": "index.js",
   "scripts": {
-    "dev": "vercel dev",
+    "dev": "vercel dev --listen 3000",
     "build": "prisma generate && tsc",
     "start": "node dist/index.js",
     "db:generate": "prisma generate",
