@@ -2,12 +2,84 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { prisma } from '../src/lib/prisma';
 import { createErrorResponse, createSuccessResponse } from '../src/lib/validation';
 
-// Helper function to calculate streak
+// Helper function to get user's schedule and determine day type
+async function getScheduledDayType(userId: string, date: Date = new Date()) {
+  const schedule = await prisma.schedule.findUnique({
+    where: { user_id: userId },
+  });
+
+  if (!schedule || !schedule.is_active) {
+    return null; // No schedule or inactive
+  }
+
+  // For weekly schedules, check the day of week
+  if (schedule.schedule_type === 'weekly') {
+    const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, etc.
+    const dayFields = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayField = dayFields[dayOfWeek];
+    
+    return schedule[dayField] ? 'workout' : 'rest';
+  }
+
+  // For rotating schedules, use the rotation pattern
+  if (schedule.schedule_type === 'rotating' && schedule.rotation_pattern) {
+    const pattern = schedule.rotation_pattern.split(',');
+    const daysSinceStart = Math.floor((date.getTime() - schedule.created_at.getTime()) / (1000 * 60 * 60 * 24));
+    const patternIndex = daysSinceStart % pattern.length;
+    const dayType = pattern[patternIndex].trim().toLowerCase();
+    
+    // Update current rotation day
+    await prisma.schedule.update({
+      where: { id: schedule.id },
+      data: { current_rotation_day: patternIndex },
+    });
+    
+    return dayType === 'rest' ? 'rest' : 'workout';
+  }
+
+  return null;
+}
+
+// Helper function to calculate streak (including scheduled rest days)
 async function calculateStreak(userId: string) {
   const checkins = await prisma.checkIn.findMany({
     where: { user_id: userId },
     orderBy: { date: 'desc' },
   });
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  // Get user's schedule to determine if today is a scheduled rest day
+  const scheduledDayType = await getScheduledDayType(userId, today);
+  
+  // If today is a scheduled rest day and user hasn't checked in, count it as a rest day
+  if (scheduledDayType === 'rest') {
+    const todayCheckin = checkins.find(checkin => {
+      const checkinDate = new Date(checkin.date);
+      checkinDate.setHours(0, 0, 0, 0);
+      return checkinDate.getTime() === today.getTime();
+    });
+    
+    // If no check-in today but it's a scheduled rest day, create a virtual rest day
+    if (!todayCheckin) {
+      // Add a virtual rest day to the checkins array for streak calculation
+      checkins.unshift({
+        id: 'virtual_rest',
+        user_id: userId,
+        date: today,
+        status: 'rest' as any,
+        workout_type: 'Rest Day',
+        notes: 'Scheduled rest day',
+        photo_url: null,
+        duration_minutes: null,
+        calories_burned: null,
+        discord_message_id: null,
+        created_at: today,
+        updated_at: today,
+      });
+    }
+  }
 
   if (checkins.length === 0) {
     return { current_streak: 0, longest_streak: 0, total_checkins: 0 };
@@ -17,21 +89,18 @@ async function calculateStreak(userId: string) {
   let longestStreak = 0;
   let tempStreak = 0;
   
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  
-  // Check if user checked in today (any status including rest)
-  const todayCheckin = checkins.find(checkin => {
+  // Check if user has activity today (check-in or scheduled rest day)
+  const todayActivity = checkins.find(checkin => {
     const checkinDate = new Date(checkin.date);
     checkinDate.setHours(0, 0, 0, 0);
     return checkinDate.getTime() === today.getTime();
   });
 
-  if (todayCheckin) {
+  if (todayActivity) {
     currentStreak = 1;
     tempStreak = 1;
     
-    // Count consecutive days backwards (including rest days)
+    // Count consecutive days backwards (including rest days and scheduled rest days)
     for (let i = 1; i < checkins.length; i++) {
       const currentDate = new Date(checkins[i].date);
       const previousDate = new Date(checkins[i - 1].date);
@@ -73,7 +142,7 @@ async function calculateStreak(userId: string) {
   return {
     current_streak: currentStreak,
     longest_streak: longestStreak,
-    total_checkins: checkins.length,
+    total_checkins: checkins.filter(c => c.id !== 'virtual_rest').length, // Don't count virtual rest days in total
   };
 }
 
@@ -115,6 +184,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleCheckinList(req, res);
       case path === 'schedules' && req.method === 'POST':
         return handleScheduleCreate(req, res);
+      case path === 'schedules/flexible' && req.method === 'POST':
+        return handleFlexibleScheduleCreate(req, res);
       case path.startsWith('schedules/'):
         return handleScheduleGet(req, res);
       case path === 'cheers' && req.method === 'POST':
@@ -183,6 +254,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
       },
       schedules: {
         create: '/api/schedules',
+        flexible: '/api/schedules/flexible',
         get: '/api/schedules/:userId'
       },
       cheers: {
@@ -792,6 +864,144 @@ async function handleScheduleCreate(req: VercelRequest, res: VercelResponse) {
 
   } catch (error) {
     console.error('Schedule create error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
+// Handle flexible schedule creation (with rotation patterns)
+async function handleFlexibleScheduleCreate(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    // Verify authentication
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json(createErrorResponse('Authorization header required'));
+    }
+
+    const token = authHeader.split(' ')[1];
+    const jwt = require('jsonwebtoken');
+    
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET!);
+    } catch (error) {
+      return res.status(401).json(createErrorResponse('Invalid or expired token'));
+    }
+
+    const { 
+      schedule_type, rotation_pattern, monday, tuesday, wednesday, thursday, friday, saturday, sunday,
+      timezone, reminder_time, rest_days_allowed 
+    } = req.body;
+
+    // Validate schedule type
+    if (!['weekly', 'rotating', 'custom'].includes(schedule_type)) {
+      return res.status(400).json(createErrorResponse('Schedule type must be weekly, rotating, or custom'));
+    }
+
+    // For rotating schedules, validate rotation pattern
+    if (schedule_type === 'rotating' && !rotation_pattern) {
+      return res.status(400).json(createErrorResponse('Rotation pattern is required for rotating schedules'));
+    }
+
+    if (schedule_type === 'rotating' && rotation_pattern) {
+      const pattern = rotation_pattern.split(',').map(p => p.trim().toLowerCase());
+      const validTypes = ['upper', 'lower', 'rest', 'cardio', 'strength', 'workout'];
+      const invalidTypes = pattern.filter(p => !validTypes.includes(p));
+      
+      if (invalidTypes.length > 0) {
+        return res.status(400).json(createErrorResponse(`Invalid workout types in pattern: ${invalidTypes.join(', ')}. Valid types: ${validTypes.join(', ')}`));
+      }
+    }
+
+    // For weekly schedules, validate at least one day is selected
+    if (schedule_type === 'weekly' && !monday && !tuesday && !wednesday && !thursday && !friday && !saturday && !sunday) {
+      return res.status(400).json(createErrorResponse('At least one day must be selected for weekly schedules'));
+    }
+
+    // Check if user already has a schedule
+    const existingSchedule = await prisma.schedule.findFirst({
+      where: { user_id: decoded.id },
+    });
+
+    let schedule;
+    if (existingSchedule) {
+      // Update existing schedule
+      schedule = await prisma.schedule.update({
+        where: { id: existingSchedule.id },
+        data: {
+          schedule_type,
+          rotation_pattern: schedule_type === 'rotating' ? rotation_pattern : null,
+          monday: schedule_type === 'weekly' ? (monday || false) : false,
+          tuesday: schedule_type === 'weekly' ? (tuesday || false) : false,
+          wednesday: schedule_type === 'weekly' ? (wednesday || false) : false,
+          thursday: schedule_type === 'weekly' ? (thursday || false) : false,
+          friday: schedule_type === 'weekly' ? (friday || false) : false,
+          saturday: schedule_type === 'weekly' ? (saturday || false) : false,
+          sunday: schedule_type === 'weekly' ? (sunday || false) : false,
+          timezone: timezone || 'UTC',
+          reminder_time: reminder_time || '09:00',
+          rest_days_allowed: rest_days_allowed !== undefined ? rest_days_allowed : true,
+          current_rotation_day: 0,
+        },
+      });
+    } else {
+      // Create new schedule
+      schedule = await prisma.schedule.create({
+        data: {
+          user_id: decoded.id,
+          schedule_type,
+          rotation_pattern: schedule_type === 'rotating' ? rotation_pattern : null,
+          monday: schedule_type === 'weekly' ? (monday || false) : false,
+          tuesday: schedule_type === 'weekly' ? (tuesday || false) : false,
+          wednesday: schedule_type === 'weekly' ? (wednesday || false) : false,
+          thursday: schedule_type === 'weekly' ? (thursday || false) : false,
+          friday: schedule_type === 'weekly' ? (friday || false) : false,
+          saturday: schedule_type === 'weekly' ? (saturday || false) : false,
+          sunday: schedule_type === 'weekly' ? (sunday || false) : false,
+          timezone: timezone || 'UTC',
+          reminder_time: reminder_time || '09:00',
+          rest_days_allowed: rest_days_allowed !== undefined ? rest_days_allowed : true,
+          current_rotation_day: 0,
+        },
+      });
+    }
+
+    // Get today's scheduled day type
+    const today = new Date();
+    const scheduledDayType = await getScheduledDayType(decoded.id, today);
+    
+    return res.status(201).json(createSuccessResponse({
+      schedule: {
+        id: schedule.id,
+        user_id: schedule.user_id,
+        schedule_type: schedule.schedule_type,
+        rotation_pattern: schedule.rotation_pattern,
+        monday: schedule.monday,
+        tuesday: schedule.tuesday,
+        wednesday: schedule.wednesday,
+        thursday: schedule.thursday,
+        friday: schedule.friday,
+        saturday: schedule.saturday,
+        sunday: schedule.sunday,
+        timezone: schedule.timezone,
+        reminder_time: schedule.reminder_time,
+        rest_days_allowed: schedule.rest_days_allowed,
+        current_rotation_day: schedule.current_rotation_day,
+        is_active: schedule.is_active,
+        created_at: schedule.created_at,
+        updated_at: schedule.updated_at,
+      },
+      today_scheduled_type: scheduledDayType,
+      message: schedule_type === 'rotating' 
+        ? `Rotation schedule created! Pattern: ${rotation_pattern}. Today is: ${scheduledDayType || 'not scheduled'}`
+        : `Schedule created! Today is: ${scheduledDayType || 'not scheduled'}`,
+    }));
+
+  } catch (error) {
+    console.error('Flexible schedule creation error:', error);
     return res.status(500).json(createErrorResponse('Internal server error'));
   }
 }
