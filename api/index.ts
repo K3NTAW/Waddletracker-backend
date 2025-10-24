@@ -20,7 +20,7 @@ async function calculateStreak(userId: string) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   
-  // Check if user checked in today
+  // Check if user checked in today (any status including rest)
   const todayCheckin = checkins.find(checkin => {
     const checkinDate = new Date(checkin.date);
     checkinDate.setHours(0, 0, 0, 0);
@@ -31,23 +31,27 @@ async function calculateStreak(userId: string) {
     currentStreak = 1;
     tempStreak = 1;
     
-    // Count consecutive days backwards
+    // Count consecutive days backwards (including rest days)
     for (let i = 1; i < checkins.length; i++) {
       const currentDate = new Date(checkins[i].date);
       const previousDate = new Date(checkins[i - 1].date);
       
       const dayDiff = Math.floor((previousDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24));
       
+      // Streak continues if it's consecutive days (including rest days)
+      // Only breaks if there's a gap of more than 1 day
       if (dayDiff === 1) {
         tempStreak++;
         currentStreak = tempStreak;
-      } else {
+      } else if (dayDiff > 1) {
+        // Gap of more than 1 day breaks the streak
         break;
       }
+      // If dayDiff === 0, it's the same day, so we continue
     }
   }
 
-  // Calculate longest streak
+  // Calculate longest streak (including rest days)
   tempStreak = 1;
   longestStreak = 1;
   
@@ -60,9 +64,10 @@ async function calculateStreak(userId: string) {
     if (dayDiff === 1) {
       tempStreak++;
       longestStreak = Math.max(longestStreak, tempStreak);
-    } else {
+    } else if (dayDiff > 1) {
       tempStreak = 1;
     }
+    // If dayDiff === 0, it's the same day, so we continue
   }
 
   return {
@@ -126,6 +131,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleDiscordRegister(req, res);
       case path.startsWith('discord/checkin'):
         return handleDiscordCheckin(req, res);
+      case path.startsWith('discord/rest-day'):
+        return handleDiscordRestDay(req, res);
       case path.startsWith('discord/checkin-embed'):
         return handleDiscordCheckinEmbed(req, res);
       case path.startsWith('discord/profile-embed'):
@@ -190,6 +197,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         register_embed: '/api/discord/register-embed',
         register: '/api/discord/register',
         checkin: '/api/discord/checkin',
+        rest_day: '/api/discord/rest-day',
         checkin_embed: '/api/discord/checkin-embed',
         profile_embed: '/api/discord/profile-embed?discord_id={discordId}',
         cheer_embed: '/api/discord/cheer-embed',
@@ -1047,7 +1055,7 @@ async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
       return res.status(404).json(createErrorResponse('User not found - not registered'));
     }
 
-    // Check if user already checked in today
+    // Check if user already checked in today (only for non-rest days)
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -1063,7 +1071,8 @@ async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
       },
     });
 
-    if (existingCheckin) {
+    // Only prevent duplicate check-ins if it's not a rest day
+    if (existingCheckin && status !== 'rest') {
       return res.status(400).json(createErrorResponse('User has already checked in today'));
     }
 
@@ -1092,18 +1101,21 @@ async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
       },
     });
 
-    // Create Discord embed
+    // Create Discord embed based on status
+    const isRestDay = status === 'rest';
     const embed: any = {
-      title: '🏋️ Check-in Logged!',
-      description: `**${username}** has successfully logged their workout!`,
-      color: 0x00ff00, // Green color
+      title: isRestDay ? '😴 Rest Day Logged!' : '🏋️ Check-in Logged!',
+      description: isRestDay 
+        ? `**${username}** has logged a rest day - recovery is important! 💪`
+        : `**${username}** has successfully logged their workout!`,
+      color: isRestDay ? 0xffa500 : 0x00ff00, // Orange for rest, green for workout
       thumbnail: {
         url: avatar_url || user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
       },
       fields: [
         {
-          name: '💪 Workout Type',
-          value: workout_type || 'General Exercise',
+          name: isRestDay ? '😴 Rest Day' : '💪 Workout Type',
+          value: isRestDay ? 'Recovery & Rest' : (workout_type || 'General Exercise'),
           inline: true,
         },
         {
@@ -1118,7 +1130,7 @@ async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
         },
       ],
       footer: {
-        text: 'WaddleFit - Keep up the great work!',
+        text: isRestDay ? 'WaddleFit - Rest is part of the journey! 💤' : 'WaddleFit - Keep up the great work!',
       },
       timestamp: new Date().toISOString(),
     };
@@ -1174,6 +1186,130 @@ async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
 
   } catch (error) {
     console.error('Discord check-in error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
+// Handle Discord rest day check-in
+async function handleDiscordRestDay(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    const { discord_id, username, avatar_url, notes, date } = req.body;
+
+    if (!discord_id || !username) {
+      return res.status(400).json(createErrorResponse('Discord ID and username are required'));
+    }
+
+    // Find user by Discord ID
+    const user = await prisma.user.findUnique({
+      where: { discord_id: discord_id },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found - not registered'));
+    }
+
+    // Check if user already checked in today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const existingCheckin = await prisma.checkIn.findFirst({
+      where: {
+        user_id: user.id,
+        date: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+
+    if (existingCheckin) {
+      return res.status(400).json(createErrorResponse('User has already checked in today'));
+    }
+
+    // Create rest day check-in
+    const checkin = await prisma.checkIn.create({
+      data: {
+        user_id: user.id,
+        status: 'rest',
+        workout_type: 'Rest Day',
+        notes: notes || 'Planned rest day for recovery',
+        date: date ? new Date(date) : new Date(),
+      },
+    });
+
+    // Calculate and update streak (rest days count for streaks)
+    const streak = await calculateStreak(user.id);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { 
+        current_streak: streak.current_streak,
+        longest_streak: streak.longest_streak,
+        total_checkins: streak.total_checkins,
+      },
+    });
+
+    // Create Discord embed for rest day
+    const embed: any = {
+      title: '😴 Rest Day Logged!',
+      description: `**${username}** has logged a rest day - recovery is important! 💪`,
+      color: 0xffa500, // Orange color for rest
+      thumbnail: {
+        url: avatar_url || user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '😴 Rest Day',
+          value: 'Recovery & Rest',
+          inline: true,
+        },
+        {
+          name: '🔥 Current Streak',
+          value: `${streak.current_streak} days`,
+          inline: true,
+        },
+        {
+          name: '📊 Total Check-ins',
+          value: `${streak.total_checkins}`,
+          inline: true,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Rest is part of the journey! 💤',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Add notes if provided
+    if (notes) {
+      embed.fields.push({
+        name: '📝 Notes',
+        value: notes,
+        inline: false,
+      });
+    }
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      checkin: {
+        id: checkin.id,
+        user_id: checkin.user_id,
+        status: checkin.status,
+        workout_type: checkin.workout_type,
+        notes: checkin.notes,
+        date: checkin.date,
+        created_at: checkin.created_at,
+      },
+      streak: streak,
+    }));
+
+  } catch (error) {
+    console.error('Discord rest day error:', error);
     return res.status(500).json(createErrorResponse('Internal server error'));
   }
 }

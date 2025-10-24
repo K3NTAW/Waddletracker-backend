@@ -71,6 +71,11 @@ model Schedule {
   timezone      String   @default("UTC")
   reminder_time String   @default("09:00")
   is_active     Boolean  @default(true)
+  // New fields for flexible scheduling
+  schedule_type String @default("weekly") // "weekly", "rotating", "custom"
+  rotation_pattern String? // For Upper/Lower/Rest patterns: "upper,lower,rest,upper,lower,rest,rest"
+  current_rotation_day Int @default(0) // Tracks current day in rotation
+  rest_days_allowed Boolean @default(true) // Whether rest days count for streaks
   created_at    DateTime @default(now())
   updated_at    DateTime @updatedAt
 
@@ -116,6 +121,7 @@ model Notification {
 enum CheckInStatus {
   went
   missed
+  rest
 }
 
 enum NotificationType {
