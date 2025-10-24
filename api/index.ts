@@ -16,7 +16,7 @@ async function getScheduledDayType(userId: string, date: Date = new Date()) {
   if (schedule.schedule_type === 'weekly') {
     const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, etc.
     const dayFields = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-    const dayField = dayFields[dayOfWeek];
+    const dayField = dayFields[dayOfWeek] as keyof typeof schedule;
     
     return schedule[dayField] ? 'workout' : 'rest';
   }
@@ -907,9 +907,9 @@ async function handleFlexibleScheduleCreate(req: VercelRequest, res: VercelRespo
     }
 
     if (schedule_type === 'rotating' && rotation_pattern) {
-      const pattern = rotation_pattern.split(',').map(p => p.trim().toLowerCase());
+      const pattern = rotation_pattern.split(',').map((p: string) => p.trim().toLowerCase());
       const validTypes = ['upper', 'lower', 'rest', 'cardio', 'strength', 'workout'];
-      const invalidTypes = pattern.filter(p => !validTypes.includes(p));
+      const invalidTypes = pattern.filter((p: string) => !validTypes.includes(p));
       
       if (invalidTypes.length > 0) {
         return res.status(400).json(createErrorResponse(`Invalid workout types in pattern: ${invalidTypes.join(', ')}. Valid types: ${validTypes.join(', ')}`));
