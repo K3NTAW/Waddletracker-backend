@@ -39,6 +39,42 @@ enum CheckInStatus {
 
 ---
 
+## 🔑 **Bot Authentication Setup**
+
+### **Environment Variables Required**
+Set these in your Discord bot deployment:
+
+```bash
+# Required: Bot authentication token
+BOT_AUTH_TOKEN=your_secure_bot_token_here
+
+# Required: Backend API URL
+API_BASE_URL=https://waddletracker-backend.vercel.app
+```
+
+### **Generate Bot Token**
+```bash
+# Generate a secure 32-character token
+openssl rand -hex 32
+# Or use any secure random string generator
+```
+
+### **Discord-Specific Endpoints**
+The backend now provides **Discord-specific endpoints** that use bot authentication instead of user JWT tokens:
+
+- **`POST /api/discord/schedule`** - Schedule management (create, get, update, delete)
+- **`POST /api/discord/checkin`** - Check-in logging
+- **`POST /api/discord/rest-day`** - Rest day logging
+- **`GET /api/discord/profile-embed`** - Profile information
+- **`GET /api/discord/user/:discordId`** - User data by Discord ID
+
+**Authentication Header:**
+```http
+X-Bot-Token: your_secure_bot_token_here
+```
+
+---
+
 ## 🆕 **New API Endpoints**
 
 ### **1. Flexible Schedule Creation**
@@ -111,7 +147,36 @@ Content-Type: application/json
 }
 ```
 
-### **3. Updated Check-in Endpoint**
+### **3. Discord Schedule Management**
+```http
+POST /api/discord/schedule
+X-Bot-Token: your_secure_bot_token_here
+Content-Type: application/json
+
+{
+  "action": "create",  // "create", "update", "get", "delete"
+  "discord_id": "123456789",
+  "schedule_type": "rotating",
+  "rotation_pattern": "upper,lower,rest,upper,lower,rest,rest",
+  "timezone": "UTC",
+  "reminder_time": "09:00",
+  "rest_days_allowed": true
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "schedule": { /* schedule details */ },
+    "today_scheduled_type": "rest",  // "workout" | "rest" | null
+    "message": "Rotation schedule created! Pattern: upper,lower,rest,upper,lower,rest,rest. Today is: rest"
+  }
+}
+```
+
+### **4. Updated Check-in Endpoint**
 The existing `/api/discord/checkin` now supports:
 ```json
 {
@@ -229,11 +294,70 @@ The existing `/api/discord/checkin` now supports:
 
 ## 🔧 **Implementation Guidelines**
 
-### **1. Schedule Detection Logic**
+### **1. API Client Setup**
 ```javascript
-// Check if user has a schedule
-const schedule = await api.get(`/api/schedules/${userId}`);
-const todayType = await api.get(`/api/schedules/${userId}/today`);
+// API client with bot authentication
+class WaddleTrackerAPI {
+  constructor() {
+    this.baseURL = process.env.API_BASE_URL;
+    this.botToken = process.env.BOT_AUTH_TOKEN;
+  }
+
+  async request(endpoint, options = {}) {
+    const response = await fetch(`${this.baseURL}${endpoint}`, {
+      ...options,
+      headers: {
+        'X-Bot-Token': this.botToken,
+        'Content-Type': 'application/json',
+        ...options.headers
+      }
+    });
+    
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'API request failed');
+    }
+    
+    return response.json();
+  }
+
+  // Discord-specific endpoints
+  async getSchedule(discordId) {
+    return this.request('/api/discord/schedule', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'get', discord_id: discordId })
+    });
+  }
+
+  async createSchedule(discordId, scheduleData) {
+    return this.request('/api/discord/schedule', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'create', discord_id: discordId, ...scheduleData })
+    });
+  }
+
+  async logCheckin(discordId, checkinData) {
+    return this.request('/api/discord/checkin', {
+      method: 'POST',
+      body: JSON.stringify({ discord_id: discordId, ...checkinData })
+    });
+  }
+
+  async logRestDay(discordId, restData) {
+    return this.request('/api/discord/rest-day', {
+      method: 'POST',
+      body: JSON.stringify({ discord_id: discordId, ...restData })
+    });
+  }
+}
+```
+
+### **2. Schedule Detection Logic**
+```javascript
+// Check if user has a schedule and today's type
+const api = new WaddleTrackerAPI();
+const scheduleResponse = await api.getSchedule(discordId);
+const todayType = scheduleResponse.data.today_scheduled_type;
 
 if (todayType === 'rest') {
   // Show "Rest day scheduled - no check-in needed!"

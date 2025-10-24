@@ -2,6 +2,12 @@ import { VercelRequest, VercelResponse } from '@vercel/node';
 import { prisma } from '../src/lib/prisma';
 import { createErrorResponse, createSuccessResponse } from '../src/lib/validation';
 
+// Helper function to verify bot authentication
+function verifyBotAuth(req: VercelRequest): boolean {
+  const botToken = req.headers['x-bot-token'] || req.headers['authorization']?.replace('Bot ', '');
+  return botToken === process.env.BOT_AUTH_TOKEN;
+}
+
 // Helper function to get user's schedule and determine day type
 async function getScheduledDayType(userId: string, date: Date = new Date()) {
   const schedule = await prisma.schedule.findUnique({
@@ -204,6 +210,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleDiscordCheckin(req, res);
       case path.startsWith('discord/rest-day'):
         return handleDiscordRestDay(req, res);
+      case path.startsWith('discord/schedule'):
+        return handleDiscordSchedule(req, res);
       case path.startsWith('discord/checkin-embed'):
         return handleDiscordCheckinEmbed(req, res);
       case path.startsWith('discord/profile-embed'):
@@ -270,6 +278,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         register: '/api/discord/register',
         checkin: '/api/discord/checkin',
         rest_day: '/api/discord/rest-day',
+        schedule: '/api/discord/schedule',
         checkin_embed: '/api/discord/checkin-embed',
         profile_embed: '/api/discord/profile-embed?discord_id={discordId}',
         cheer_embed: '/api/discord/cheer-embed',
@@ -1520,6 +1529,205 @@ async function handleDiscordRestDay(req: VercelRequest, res: VercelResponse) {
 
   } catch (error) {
     console.error('Discord rest day error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
+// Handle Discord schedule management
+async function handleDiscordSchedule(req: VercelRequest, res: VercelResponse) {
+  // Verify bot authentication
+  if (!verifyBotAuth(req)) {
+    return res.status(401).json(createErrorResponse('Bot authentication required'));
+  }
+
+  const { action, discord_id, schedule_type, rotation_pattern, monday, tuesday, wednesday, thursday, friday, saturday, sunday, timezone, reminder_time, rest_days_allowed } = req.body;
+
+  if (!discord_id) {
+    return res.status(400).json(createErrorResponse('Discord ID is required'));
+  }
+
+  try {
+    // Find user by Discord ID
+    const user = await prisma.user.findUnique({
+      where: { discord_id: discord_id },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found - not registered'));
+    }
+
+    if (action === 'create' || action === 'update') {
+      // Validate schedule type
+      if (!['weekly', 'rotating', 'custom'].includes(schedule_type)) {
+        return res.status(400).json(createErrorResponse('Schedule type must be weekly, rotating, or custom'));
+      }
+
+      // For rotating schedules, validate rotation pattern
+      if (schedule_type === 'rotating' && !rotation_pattern) {
+        return res.status(400).json(createErrorResponse('Rotation pattern is required for rotating schedules'));
+      }
+
+      if (schedule_type === 'rotating' && rotation_pattern) {
+        const pattern = rotation_pattern.split(',').map((p: string) => p.trim().toLowerCase());
+        const validTypes = ['upper', 'lower', 'rest', 'cardio', 'strength', 'workout'];
+        const invalidTypes = pattern.filter((p: string) => !validTypes.includes(p));
+        
+        if (invalidTypes.length > 0) {
+          return res.status(400).json(createErrorResponse(`Invalid workout types in pattern: ${invalidTypes.join(', ')}. Valid types: ${validTypes.join(', ')}`));
+        }
+      }
+
+      // For weekly schedules, validate at least one day is selected
+      if (schedule_type === 'weekly' && !monday && !tuesday && !wednesday && !thursday && !friday && !saturday && !sunday) {
+        return res.status(400).json(createErrorResponse('At least one day must be selected for weekly schedules'));
+      }
+
+      // Check if user already has a schedule
+      const existingSchedule = await prisma.schedule.findFirst({
+        where: { user_id: user.id },
+      });
+
+      let schedule;
+      if (existingSchedule) {
+        // Update existing schedule
+        schedule = await prisma.schedule.update({
+          where: { id: existingSchedule.id },
+          data: {
+            schedule_type,
+            rotation_pattern: schedule_type === 'rotating' ? rotation_pattern : null,
+            monday: schedule_type === 'weekly' ? (monday || false) : false,
+            tuesday: schedule_type === 'weekly' ? (tuesday || false) : false,
+            wednesday: schedule_type === 'weekly' ? (wednesday || false) : false,
+            thursday: schedule_type === 'weekly' ? (thursday || false) : false,
+            friday: schedule_type === 'weekly' ? (friday || false) : false,
+            saturday: schedule_type === 'weekly' ? (saturday || false) : false,
+            sunday: schedule_type === 'weekly' ? (sunday || false) : false,
+            timezone: timezone || 'UTC',
+            reminder_time: reminder_time || '09:00',
+            rest_days_allowed: rest_days_allowed !== undefined ? rest_days_allowed : true,
+            current_rotation_day: 0,
+          },
+        });
+      } else {
+        // Create new schedule
+        schedule = await prisma.schedule.create({
+          data: {
+            user_id: user.id,
+            schedule_type,
+            rotation_pattern: schedule_type === 'rotating' ? rotation_pattern : null,
+            monday: schedule_type === 'weekly' ? (monday || false) : false,
+            tuesday: schedule_type === 'weekly' ? (tuesday || false) : false,
+            wednesday: schedule_type === 'weekly' ? (wednesday || false) : false,
+            thursday: schedule_type === 'weekly' ? (thursday || false) : false,
+            friday: schedule_type === 'weekly' ? (friday || false) : false,
+            saturday: schedule_type === 'weekly' ? (saturday || false) : false,
+            sunday: schedule_type === 'weekly' ? (sunday || false) : false,
+            timezone: timezone || 'UTC',
+            reminder_time: reminder_time || '09:00',
+            rest_days_allowed: rest_days_allowed !== undefined ? rest_days_allowed : true,
+            current_rotation_day: 0,
+          },
+        });
+      }
+
+      // Get today's scheduled day type
+      const today = new Date();
+      const scheduledDayType = await getScheduledDayType(user.id, today);
+      
+      return res.json(createSuccessResponse({
+        schedule: {
+          id: schedule.id,
+          user_id: schedule.user_id,
+          schedule_type: schedule.schedule_type,
+          rotation_pattern: schedule.rotation_pattern,
+          monday: schedule.monday,
+          tuesday: schedule.tuesday,
+          wednesday: schedule.wednesday,
+          thursday: schedule.thursday,
+          friday: schedule.friday,
+          saturday: schedule.saturday,
+          sunday: schedule.sunday,
+          timezone: schedule.timezone,
+          reminder_time: schedule.reminder_time,
+          rest_days_allowed: schedule.rest_days_allowed,
+          current_rotation_day: schedule.current_rotation_day,
+          is_active: schedule.is_active,
+          created_at: schedule.created_at,
+          updated_at: schedule.updated_at,
+        },
+        today_scheduled_type: scheduledDayType,
+        message: schedule_type === 'rotating' 
+          ? `Rotation schedule created! Pattern: ${rotation_pattern}. Today is: ${scheduledDayType || 'not scheduled'}`
+          : `Schedule created! Today is: ${scheduledDayType || 'not scheduled'}`,
+      }));
+
+    } else if (action === 'get') {
+      // Get user's current schedule
+      const schedule = await prisma.schedule.findFirst({
+        where: { user_id: user.id },
+      });
+
+      if (!schedule) {
+        return res.json(createSuccessResponse({
+          schedule: null,
+          today_scheduled_type: null,
+          message: 'No schedule found. Use /schedule create to set up your workout schedule.',
+        }));
+      }
+
+      // Get today's scheduled day type
+      const today = new Date();
+      const scheduledDayType = await getScheduledDayType(user.id, today);
+      
+      return res.json(createSuccessResponse({
+        schedule: {
+          id: schedule.id,
+          user_id: schedule.user_id,
+          schedule_type: schedule.schedule_type,
+          rotation_pattern: schedule.rotation_pattern,
+          monday: schedule.monday,
+          tuesday: schedule.tuesday,
+          wednesday: schedule.wednesday,
+          thursday: schedule.thursday,
+          friday: schedule.friday,
+          saturday: schedule.saturday,
+          sunday: schedule.sunday,
+          timezone: schedule.timezone,
+          reminder_time: schedule.reminder_time,
+          rest_days_allowed: schedule.rest_days_allowed,
+          current_rotation_day: schedule.current_rotation_day,
+          is_active: schedule.is_active,
+          created_at: schedule.created_at,
+          updated_at: schedule.updated_at,
+        },
+        today_scheduled_type: scheduledDayType,
+        message: `Current schedule: ${schedule.schedule_type}. Today is: ${scheduledDayType || 'not scheduled'}`,
+      }));
+
+    } else if (action === 'delete') {
+      // Delete user's schedule
+      const schedule = await prisma.schedule.findFirst({
+        where: { user_id: user.id },
+      });
+
+      if (!schedule) {
+        return res.status(404).json(createErrorResponse('No schedule found to delete'));
+      }
+
+      await prisma.schedule.delete({
+        where: { id: schedule.id },
+      });
+
+      return res.json(createSuccessResponse({
+        message: 'Schedule deleted successfully',
+      }));
+
+    } else {
+      return res.status(400).json(createErrorResponse('Invalid action. Use: create, update, get, or delete'));
+    }
+
+  } catch (error) {
+    console.error('Discord schedule error:', error);
     return res.status(500).json(createErrorResponse('Internal server error'));
   }
 }
