@@ -124,6 +124,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleDiscordRegisterEmbed(req, res);
       case path.startsWith('discord/register'):
         return handleDiscordRegister(req, res);
+      case path.startsWith('discord/checkin'):
+        return handleDiscordCheckin(req, res);
       case path.startsWith('discord/checkin-embed'):
         return handleDiscordCheckinEmbed(req, res);
       case path.startsWith('discord/profile-embed'):
@@ -187,6 +189,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         user_profile: '/api/discord/user/:discordId',
         register_embed: '/api/discord/register-embed',
         register: '/api/discord/register',
+        checkin: '/api/discord/checkin',
         checkin_embed: '/api/discord/checkin-embed',
         profile_embed: '/api/discord/profile-embed?discord_id={discordId}',
         cheer_embed: '/api/discord/cheer-embed',
@@ -1023,6 +1026,158 @@ async function handleStreakGet(req: VercelRequest, res: VercelResponse) {
 }
 
 // Discord handlers
+async function handleDiscordCheckin(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'POST') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    const { discord_id, username, avatar_url, status, photo_url, date, workout_type, notes, duration_minutes, calories_burned } = req.body;
+
+    if (!discord_id || !username) {
+      return res.status(400).json(createErrorResponse('Discord ID and username are required'));
+    }
+
+    // Find user by Discord ID
+    const user = await prisma.user.findUnique({
+      where: { discord_id: discord_id },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found - not registered'));
+    }
+
+    // Check if user already checked in today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const existingCheckin = await prisma.checkIn.findFirst({
+      where: {
+        user_id: user.id,
+        date: {
+          gte: today,
+          lt: tomorrow,
+        },
+      },
+    });
+
+    if (existingCheckin) {
+      return res.status(400).json(createErrorResponse('User has already checked in today'));
+    }
+
+    // Create check-in
+    const checkin = await prisma.checkIn.create({
+      data: {
+        user_id: user.id,
+        status: status || 'went',
+        workout_type: workout_type || null,
+        notes: notes || null,
+        photo_url: photo_url || null,
+        duration_minutes: duration_minutes || null,
+        calories_burned: calories_burned || null,
+        date: date ? new Date(date) : new Date(),
+      },
+    });
+
+    // Calculate and update streak
+    const streak = await calculateStreak(user.id);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { 
+        current_streak: streak.current_streak,
+        longest_streak: streak.longest_streak,
+        total_checkins: streak.total_checkins,
+      },
+    });
+
+    // Create Discord embed
+    const embed: any = {
+      title: '🏋️ Check-in Logged!',
+      description: `**${username}** has successfully logged their workout!`,
+      color: 0x00ff00, // Green color
+      thumbnail: {
+        url: avatar_url || user.avatar_url || 'https://cdn.discordapp.com/embed/avatars/0.png',
+      },
+      fields: [
+        {
+          name: '💪 Workout Type',
+          value: workout_type || 'General Exercise',
+          inline: true,
+        },
+        {
+          name: '🔥 Current Streak',
+          value: `${streak.current_streak} days`,
+          inline: true,
+        },
+        {
+          name: '📊 Total Check-ins',
+          value: `${streak.total_checkins}`,
+          inline: true,
+        },
+      ],
+      footer: {
+        text: 'WaddleFit - Keep up the great work!',
+      },
+      timestamp: new Date().toISOString(),
+    };
+
+    // Add optional fields if provided
+    if (notes) {
+      embed.fields.push({
+        name: '📝 Notes',
+        value: notes,
+        inline: false,
+      });
+    }
+
+    if (duration_minutes) {
+      embed.fields.push({
+        name: '⏱️ Duration',
+        value: `${duration_minutes} minutes`,
+        inline: true,
+      });
+    }
+
+    if (calories_burned) {
+      embed.fields.push({
+        name: '🔥 Calories Burned',
+        value: `${calories_burned}`,
+        inline: true,
+      });
+    }
+
+    // Add image if available
+    if (photo_url) {
+      embed.image = {
+        url: photo_url,
+      };
+    }
+
+    return res.json(createSuccessResponse({
+      embed: embed,
+      checkin: {
+        id: checkin.id,
+        user_id: checkin.user_id,
+        status: checkin.status,
+        workout_type: checkin.workout_type,
+        notes: checkin.notes,
+        photo_url: checkin.photo_url,
+        duration_minutes: checkin.duration_minutes,
+        calories_burned: checkin.calories_burned,
+        date: checkin.date,
+        created_at: checkin.created_at,
+      },
+      streak: streak,
+    }));
+
+  } catch (error) {
+    console.error('Discord check-in error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
 async function handleDiscordUserProfile(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
