@@ -188,7 +188,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         register_embed: '/api/discord/register-embed',
         register: '/api/discord/register',
         checkin_embed: '/api/discord/checkin-embed',
-        profile_embed: '/api/discord/profile-embed',
+        profile_embed: '/api/discord/profile-embed?discord_id={discordId}',
         cheer_embed: '/api/discord/cheer-embed',
         webhook: '/api/discord/webhook'
       },
@@ -1410,17 +1410,18 @@ async function handleDiscordProfileEmbed(req: VercelRequest, res: VercelResponse
 
   try {
     const url = new URL(req.url || '', 'http://localhost');
-    const userId = url.searchParams.get('user_id');
+    const discordId = url.searchParams.get('discord_id');
 
-    if (!userId) {
-      return res.status(400).json(createErrorResponse('User ID is required'));
+    if (!discordId) {
+      return res.status(400).json(createErrorResponse('Discord ID is required'));
     }
 
-    // Get user info with stats
+    // Get user info with stats by Discord ID
     const user = await prisma.user.findUnique({
-      where: { id: userId },
+      where: { discord_id: discordId },
       select: {
         id: true,
+        discord_id: true,
         username: true,
         avatar_url: true,
         bio: true,
@@ -1432,12 +1433,12 @@ async function handleDiscordProfileEmbed(req: VercelRequest, res: VercelResponse
     });
 
     if (!user) {
-      return res.status(404).json(createErrorResponse('User not found'));
+      return res.status(404).json(createErrorResponse('User not found - not registered'));
     }
 
     // Get recent check-ins
     const recentCheckins = await prisma.checkIn.findMany({
-      where: { user_id: userId },
+      where: { user_id: user.id },
       orderBy: { date: 'desc' },
       take: 5,
       select: {
@@ -1450,12 +1451,12 @@ async function handleDiscordProfileEmbed(req: VercelRequest, res: VercelResponse
 
     // Get cheers received
     const cheersReceived = await prisma.cheer.count({
-      where: { to_user_id: userId },
+      where: { to_user_id: user.id },
     });
 
     // Get cheers sent
     const cheersSent = await prisma.cheer.count({
-      where: { from_user_id: userId },
+      where: { from_user_id: user.id },
     });
 
     // Calculate days since joining
