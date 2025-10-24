@@ -5,7 +5,68 @@ This guide shows how to integrate the new Discord-based registration system into
 
 ## New API Endpoints
 
-### 1. Generate Registration Embed
+### 1. Check Discord User Profile
+**Endpoint:** `GET /api/discord/user/:discordId`
+
+**Purpose:** Check if a Discord user is registered and get their profile data.
+
+**Example Request:**
+```
+GET /api/discord/user/123456789012345678
+```
+
+**Response (User Found):**
+```json
+{
+  "success": true,
+  "data": {
+    "user": {
+      "id": "clx1234567890",
+      "discord_id": "123456789012345678",
+      "username": "Kenta",
+      "avatar_url": "https://cdn.discordapp.com/avatars/123456789012345678/abc123.png",
+      "bio": "Fitness enthusiast",
+      "timezone": "UTC",
+      "is_active": true,
+      "current_streak": 5,
+      "longest_streak": 12,
+      "total_checkins": 25,
+      "created_at": "2024-01-01T00:00:00.000Z",
+      "updated_at": "2024-01-15T00:00:00.000Z"
+    },
+    "stats": {
+      "current_streak": 5,
+      "longest_streak": 12,
+      "total_checkins": 25,
+      "cheers_received": 8,
+      "cheers_sent": 12,
+      "days_since_joining": 15
+    },
+    "recent_checkins": [
+      {
+        "id": "checkin123",
+        "workout_type": "Weight Training",
+        "date": "2024-01-15T00:00:00.000Z",
+        "notes": "Great session!",
+        "photo_url": "https://example.com/photo.jpg"
+      }
+    ]
+  }
+}
+```
+
+**Response (User Not Found):**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "USER_NOT_FOUND",
+    "message": "User not found - not registered"
+  }
+}
+```
+
+### 2. Generate Registration Embed
 **Endpoint:** `POST /api/discord/register-embed`
 
 **Purpose:** Creates a Discord embed with registration buttons for unregistered users.
@@ -161,15 +222,15 @@ class WaddleTrackerBot(commands.Bot):
         if user is None:
             user = ctx.author
         
-        # Check if user exists in database
+        # Check if user exists in database using Discord ID
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.api_base_url}/users/{user.id}") as response:
+            async with session.get(f"{self.api_base_url}/discord/user/{user.id}") as response:
                 if response.status == 404:
                     # User not found, show registration embed
                     await self.show_registration_embed(ctx, user)
                 elif response.status == 200:
                     # User exists, show profile
-                    await self.show_user_profile(ctx, user)
+                    await self.show_user_profile(ctx, user, await response.json())
                 else:
                     await ctx.send("❌ Error fetching user data.")
     

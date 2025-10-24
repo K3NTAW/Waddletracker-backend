@@ -118,6 +118,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return handleCheerList(req, res);
       case path.startsWith('streak/'):
         return handleStreakGet(req, res);
+      case path.startsWith('discord/user/'):
+        return handleDiscordUserProfile(req, res);
       case path.startsWith('discord/register-embed'):
         return handleDiscordRegisterEmbed(req, res);
       case path.startsWith('discord/register'):
@@ -182,6 +184,7 @@ async function handleMainAPI(req: VercelRequest, res: VercelResponse) {
         get: '/api/streak/:userId'
       },
       discord: {
+        user_profile: '/api/discord/user/:discordId',
         register_embed: '/api/discord/register-embed',
         register: '/api/discord/register',
         checkin_embed: '/api/discord/checkin-embed',
@@ -1020,6 +1023,99 @@ async function handleStreakGet(req: VercelRequest, res: VercelResponse) {
 }
 
 // Discord handlers
+async function handleDiscordUserProfile(req: VercelRequest, res: VercelResponse) {
+  if (req.method !== 'GET') {
+    return res.status(405).json(createErrorResponse('Method not allowed', 405));
+  }
+
+  try {
+    const url = new URL(req.url || '', 'http://localhost');
+    const pathParts = url.pathname.split('/');
+    const discordId = pathParts[pathParts.length - 1];
+
+    if (!discordId) {
+      return res.status(400).json(createErrorResponse('Discord ID required'));
+    }
+
+    // Find user by Discord ID
+    const user = await prisma.user.findUnique({
+      where: { discord_id: discordId },
+      select: {
+        id: true,
+        discord_id: true,
+        username: true,
+        avatar_url: true,
+        bio: true,
+        timezone: true,
+        is_active: true,
+        current_streak: true,
+        longest_streak: true,
+        total_checkins: true,
+        created_at: true,
+        updated_at: true,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json(createErrorResponse('User not found - not registered'));
+    }
+
+    // Get recent check-ins
+    const recentCheckins = await prisma.checkIn.findMany({
+      where: { user_id: user.id },
+      orderBy: { date: 'desc' },
+      take: 5,
+      select: {
+        id: true,
+        workout_type: true,
+        date: true,
+        notes: true,
+        photo_url: true,
+      },
+    });
+
+    // Get cheers received
+    const cheersReceived = await prisma.cheer.count({
+      where: { to_user_id: user.id },
+    });
+
+    // Get cheers sent
+    const cheersSent = await prisma.cheer.count({
+      where: { from_user_id: user.id },
+    });
+
+    // Calculate days since joining
+    const daysSinceJoining = Math.floor((Date.now() - new Date(user.created_at).getTime()) / (1000 * 60 * 60 * 24));
+
+    return res.json(createSuccessResponse({
+      user: {
+        id: user.id,
+        discord_id: user.discord_id,
+        username: user.username,
+        avatar_url: user.avatar_url,
+        bio: user.bio,
+        timezone: user.timezone,
+        is_active: user.is_active,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
+      },
+      stats: {
+        current_streak: user.current_streak,
+        longest_streak: user.longest_streak,
+        total_checkins: user.total_checkins,
+        cheers_received: cheersReceived,
+        cheers_sent: cheersSent,
+        days_since_joining: daysSinceJoining,
+      },
+      recent_checkins: recentCheckins,
+    }));
+
+  } catch (error) {
+    console.error('Discord user profile error:', error);
+    return res.status(500).json(createErrorResponse('Internal server error'));
+  }
+}
+
 async function handleDiscordRegisterEmbed(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'POST') {
     return res.status(405).json(createErrorResponse('Method not allowed', 405));
